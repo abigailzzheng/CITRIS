@@ -37,7 +37,7 @@ for i = 1:numel(icaoStations)
         obs = webread(metarURL);
         metarData(icao) = obs;
     catch
-        fprintf('⚠️  METAR not available for %s\n', icao);
+        fprintf('METAR not available for %s\n', icao);
     end
 
     % TAF
@@ -46,13 +46,13 @@ for i = 1:numel(icaoStations)
         forecast = webread(tafURL);
         tafData(icao) = forecast;
     catch
-        fprintf('⚠️  TAF not available for %s\n', icao);
+        fprintf('TAF not available for %s\n', icao);
     end
 end
 
 %% display METAR
 
-fprintf("\n=== METAR OBSERVATIONS (via NWS) ===\n");
+fprintf("\nMETAR OBSERVATIONS (via NWS)\n");
 
 for i = 1:numel(icaoStations)
     icao = icaoStations{i};
@@ -77,7 +77,7 @@ end
 
 %% display TAF
 
-fprintf("\n=== TAF FORECASTS (via NWS) ===\n");
+fprintf("\nTAF FORECASTS (via NWS)\n");
 
 for i = 1:numel(icaoStations)
     icao = icaoStations{i};
@@ -93,7 +93,7 @@ for i = 1:numel(icaoStations)
     end
 end
 
-fprintf("\n=== CAMPUS VERTIPORT WEATHER (via nearest ICAO proxy) ===\n");
+fprintf("\nCAMPUS VERTIPORT WEATHER (via nearest ICAO proxy)\n");
 campuses = keys(proxyMap);
 
 for i = 1:numel(campuses)
@@ -121,7 +121,7 @@ end
 
 %% distance matrix
 
-fprintf("\n=== DISTANCE MATRIX (NM) ===\n");
+fprintf("\nDISTANCE MATRIX (NM)\n");
 
 names = fieldnames(locations);
 n = numel(names);
@@ -151,7 +151,7 @@ for i = 1:n
     fprintf('\n');
 end
 
-fprintf("\n✅ Weather + Distance analysis complete.\n");
+fprintf("\nWeather + Distance analysis complete.\n");
 
 %% great circle distance 
 function nm = haversineNM(pt1, pt2)
