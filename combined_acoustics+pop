@@ -1,0 +1,105 @@
+%% 1. Load Data
+mypath = "/Users/theresadinh/Downloads"; % insert your path here 
+cd(mypath)
+
+% --- Load Noise Data ---
+load(fullfile(mypath,"davis_axes.mat"), "lonv", "latv"); % stephie's axes mat
+fid = fopen(fullfile(mypath,"davis_transportation_noise.bin"), "rb"); % bin from National Transportation Noise Map Available
+noise_raw = fread(fid, [numel(lonv) numel(latv)], "float32=>single");
+fclose(fid);
+
+% --- Load Population Data ---
+davis_lat_lim = [38.53 38.58]; % load in davis lat and long
+davis_long_lim = [-121.8 -121.67];
+% load data from, 2020 file
+% https://earth.gov/ghgcenter/data-catalog/sedac-popdensity-yeargrid5yr-v4.11
+[A_full, R_full] = readgeoraster('gpw_v4_population_density_rev11_2020_30_sec_2020.tif'); 
+[A_crop, R_crop] = geocrop(A_full, R_full, davis_lat_lim, davis_long_lim); % crop earth. gov pop densisty tif 
+
+%% 2. Processing & Spatial Alignment
+% Normalize Noise (0-1)
+noise_floor = 30; % set the floor to 30 dB so anything 30 dB or less is a feasibilty score of 0 
+noise_ceiling = 80; % anything greater than noise ceiling gives a feasibility score of 1
+noise_denom = noise_ceiling - noise_floor; % 50 in the denominator gives the "ceiling" so 30 + 50 = 80 dB
+% so 80 dB and above is feasibility score of 1 
+noise_norm = (noise_raw - noise_floor) / noise_denom;
+noise_norm(noise_norm < 0) = 0; 
+noise_norm(noise_norm > 1) = 1;
+
+% Process Population
+A_pop = double(A_crop); % convert to decimal
+A_pop(A_pop < 0) = 0;
+pop_inv = 1 - (A_pop / 8000); % take the inverse because we want a more feasible region to have small
+% populations that are not distrubed 
+pop_inv(pop_inv < 0.1) = 0.1;
+
+% --- RESTORE HIGH-RES GRID ---
+upscale = 10; 
+[lat_orig, lon_orig] = geographicGrid(R_crop);
+lat_high = imresize(lat_orig, upscale, 'bilinear');
+lon_high = imresize(lon_orig, upscale, 'bilinear');
+
+% --- THE ALIGNMENT FIX ---
+% interp2 uses (X, Y) which corresponds to (Lon, Lat).
+% We use 'noise_norm' (unflipped) and let the coordinate vectors handle the orientation.
+noise_aligned = interp2(lonv, latv, noise_norm', lon_high, lat_high, 'linear', 0);
+
+% Resize population to match the new high-res grid
+pop_resampled = imresize(pop_inv, upscale, 'bilinear');
+
+% Combine Weights (75% Noise, 25% Population)
+feasibilityGrid = (0.75 * noise_aligned + 0.25 * pop_resampled);
+
+% --- BORDER FIX ---
+% Shave edges to remove the dark opacity border
+feasibilityGrid(1:3, :) = NaN; feasibilityGrid(end-2:end, :) = NaN;
+feasibilityGrid(:, 1:3) = NaN; feasibilityGrid(:, end-2:end) = NaN;
+
+%% 3. Plotting
+figure('Position', [100, 100, 1100, 800], 'Color', 'w')
+gx = geoaxes;
+geobasemap(gx, 'satellite');
+hold(gx, 'on');
+
+% Vectorize for geoscatter
+lat_v = lat_high(:);
+lon_v = lon_high(:);
+f_v = feasibilityGrid(:);
+
+% Ensure West longitude is negative for California
+if any(lon_v > 0), lon_v = -abs(lon_v); end 
+
+% Mask for valid data points
+mask = f_v > 0.001 & ~isnan(lat_v) & ~isnan(f_v);
+
+% Plot - Marker size 160 fills the gaps for a "liquid" texture
+h = geoscatter(gx, lat_v(mask), lon_v(mask), 160, f_v(mask), ...
+    'filled', 's', 'MarkerEdgeColor', 'none', 'MarkerFaceAlpha', 0.20);
+
+% Formatting
+geolimits(gx, davis_lat_lim, davis_long_lim)
+gx.Box = 'off'; 
+drawnow;
+
+% Fix Longitude labels
+gx.LongitudeAxis.TickLabelFormat = 'dd';
+if all(gx.LongitudeAxis.TickValues > 0)
+    gx.LongitudeAxis.TickLabels = string(-gx.LongitudeAxis.TickValues);
+end
+
+title('Davis Transit Feasibility with Noise = 75% and Population = 25% Weighting')
+% 1. Generate the full 256-color map
+fullTurbo = turbo(256);
+
+% 2. Crop it to the first 180 colors (Stops at Yellow, avoids Red)
+blueToYellow = fullTurbo(1:155, :); 
+
+% 3. Apply the cropped map to your axes
+colormap(gx, blueToYellow);
+
+% 4. Set the limits and labels
+cb = colorbar(gx);
+ylabel(cb, 'Feasibility Score (0=Low, 1=High)');
+clim(gx, [0 1]);
+
+hold(gx, 'off');
