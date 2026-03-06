@@ -1,0 +1,168 @@
+classdef CITRIS_Feasibility_App < matlab.apps.AppBase
+
+    properties (Access = public)
+        UIFigure      matlab.ui.Figure
+        MapAxes       
+        NoiseSlider   matlab.ui.control.Slider
+        TrafficSlider matlab.ui.control.Slider
+        PopSlider     matlab.ui.control.Slider
+        LabelN        matlab.ui.control.Label
+        LabelT        matlab.ui.control.Label
+        LabelP        matlab.ui.control.Label
+        ScatterPlot   
+    end
+
+    properties (Access = private)
+        noise_aligned
+        traffic_mask 
+        pop_resampled
+        lat_v
+        lon_v
+        davis_lat_lim = [38.53 38.58];
+        davis_long_lim = [-121.8 -121.67];
+    end
+
+    methods (Access = private)
+
+        function updateMap(app)
+            wn = app.NoiseSlider.Value;
+            wt = app.TrafficSlider.Value;
+            wp = app.PopSlider.Value;
+            
+            total = wn + wt + wp; % make sure the weighting is always = 1 
+            if total == 0, total = 1; end
+            wn = wn/total; wt = wt/total; wp = wp/total;
+            
+            app.LabelN.Text = sprintf('Noise Masking: %.2f', wn);
+            app.LabelT.Text = sprintf('Traffic Relief: %.2f', wt);
+            app.LabelP.Text = sprintf('Population Low Density: %.2f', wp);
+
+            f_v = (wt * app.traffic_mask(:)) + ...
+                  (wn * app.noise_aligned(:)) + ...
+                  (wp * app.pop_resampled(:));
+
+            f_v = max(0, min(1, f_v));
+            app.ScatterPlot.CData = f_v;
+        end
+
+        function loadAndProcessData(app)
+            mypath = "/Users/theresadinh/Downloads/citris"; 
+            
+            % 1. Data Loading
+            data = shaperead(fullfile(mypath,"Average_Daily_Traffic_Segments.shp"));
+            lonv = linspace(-121.8602, -121.6402, 441);
+            latv = linspace(38.4881, 38.6416, 308);
+            
+            fid = fopen(fullfile(mypath, "davis_transportation_noise.bin"), "rb");
+            noise_raw = fread(fid, [numel(lonv) numel(latv)], "float32=>single");
+            fclose(fid);
+            
+            [A_full, R_full] = readgeoraster('gpw_v4_population_density_rev11_2020_30_sec_2020.tif'); 
+            [A_crop, R_crop] = geocrop(A_full, R_full, app.davis_lat_lim, app.davis_long_lim);
+            
+            % 2. Process Noise & Population
+            noise_norm = (noise_raw - 30) / (80 - 30);
+            noise_norm = min(max(noise_norm, 0), 1);
+            pop_inv = 1 - (min(double(A_crop), 8000) / 8000);
+            pop_inv(pop_inv < 0.1) = 0.1;
+
+            % 3. Grid Generation
+            upscale = 25; 
+            [lat_orig, lon_orig] = geographicGrid(R_crop);
+            lat_high = imresize(lat_orig, upscale, 'bilinear');
+            lon_high = imresize(lon_orig, upscale, 'bilinear');
+            app.lat_v = lat_high(:); 
+            app.lon_v = lon_high(:);
+            if any(app.lon_v > 0), app.lon_v = -abs(app.lon_v); end
+
+            app.noise_aligned = interp2(lonv, latv, noise_norm', lon_high, lat_high, 'linear', 0);
+            app.pop_resampled = imresize(pop_inv, upscale, 'bilinear');
+
+            % 4. HIGH-SENSITIVITY THIN TRAFFIC MASK
+            app.traffic_mask = zeros(size(lat_high));
+            fields = fieldnames(data);
+            keywords = {'ADT','AADT','TRAFFIC','VOL','COUNT'};
+            tField = '';
+            for j = 1:length(fields)
+                if any(contains(upper(fields{j}), keywords))
+                    tField = fields{j};
+                    break; 
+                end
+            end
+
+            % --- REVISED SENSITIVITY NORMALIZATION ---
+            rawVals = [data.(tField)];
+            % Using Square Root scaling to boost lower traffic values 
+            % This makes the model much more sensitive to non-highway roads
+            scaledVals = sqrt(rawVals); 
+            tMin = min(scaledVals); tMax = max(scaledVals);
+            
+            isProjected = max(abs([data(1).X])) > 1000;
+            if isProjected, proj = projcrs(2226); end
+
+            for i = 1:length(data)
+                % Apply the sensitivity scaling
+                val = (sqrt(double(data(i).(tField))) - tMin) / (tMax - tMin + 1e-6);
+                
+                curX = data(i).X;
+                curY = data(i).Y;
+                
+                if isProjected
+                    [vLat, vLon] = projinv(proj, curX, curY);
+                else
+                    vLat = curY; vLon = curX;
+                end
+                
+                % Mapping: Single-pixel mapping for "Skinny" roads
+                for k = 1:length(vLat)
+                    if isnan(vLat(k)), continue; end
+                    
+                    [~, row] = min(abs(lat_high(:,1) - vLat(k)));
+                    [~, col] = min(abs(lon_high(1,:) - vLon(k)));
+                    
+                    % Only assign to the exact cell (Skinny)
+                    app.traffic_mask(row, col) = max(app.traffic_mask(row, col), val);
+                end
+            end
+        end
+    end
+
+    methods (Access = public)
+        function app = CITRIS_Feasibility_App()
+            app.UIFigure = uifigure('Name', 'Davis eVTOL Feasibility', 'Position', [100 100 950 650]);
+            app.MapAxes = geoaxes(app.UIFigure);
+            app.MapAxes.Units = 'pixels';
+            app.MapAxes.Position = [280 50 620 550];
+            geobasemap(app.MapAxes, 'satellite');
+            geolimits(app.MapAxes, app.davis_lat_lim, app.davis_long_lim);
+
+            app.loadAndProcessData();
+
+            hold(app.MapAxes, 'on');
+            % Marker size 160 ensures the grid cells touch to form a line
+            app.ScatterPlot = geoscatter(app.MapAxes, app.lat_v, app.lon_v, 160, zeros(size(app.lat_v)), ...
+                'filled', 's', 'MarkerFaceAlpha', 0.25);
+            
+            colormap(app.MapAxes, parula);
+            cb = colorbar(app.MapAxes);
+            ylabel(cb, 'Feasibility Score');
+            clim(app.MapAxes, [0 1]);
+
+            % Controls
+            uilabel(app.UIFigure, 'Text', 'FEASIBILITY WEIGHTS', 'Position', [40 580 200 25], 'FontWeight', 'bold');
+            app.LabelN = uilabel(app.UIFigure, 'Position', [40 530 200 22]);
+            app.NoiseSlider = uislider(app.UIFigure, 'Position', [40 510 200 3], 'Limits', [0 1], 'ValueChangedFcn', @(sld,event) updateMap(app));
+            app.NoiseSlider.Value = 0.60;
+
+            app.LabelT = uilabel(app.UIFigure, 'Position', [40 430 200 22]);
+            app.TrafficSlider = uislider(app.UIFigure, 'Position', [40 410 200 3], 'Limits', [0 1], 'ValueChangedFcn', @(sld,event) updateMap(app));
+            app.TrafficSlider.Value = 0.20;
+
+            app.LabelP = uilabel(app.UIFigure, 'Position', [40 330 200 22]);
+            app.PopSlider = uislider(app.UIFigure, 'Position', [40 310 200 3], 'Limits', [0 1], 'ValueChangedFcn', @(sld,event) updateMap(app));
+            app.PopSlider.Value = 0.20;
+
+            app.updateMap();
+        end
+    end
+end
